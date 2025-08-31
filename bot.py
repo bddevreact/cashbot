@@ -14,6 +14,7 @@ import logging
 import requests
 from datetime import datetime
 from typing import Optional, Dict, Any
+from flask import Flask, request, jsonify
 
 # Telegram Bot imports
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -27,6 +28,9 @@ import firebase_admin
 from firebase_admin import credentials, firestore
 from dotenv import load_dotenv
 
+# Flask app for Railway health checks
+app = Flask(__name__)
+
 # Load environment variables
 load_dotenv()
 
@@ -38,7 +42,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Bot configuration
-BOT_TOKEN = os.getenv('BOT_TOKEN', '')
+BOT_TOKEN = os.getenv('BOT_TOKEN', '8214925584:AAGzxmpSxFTGmvU-L778DNxUJ35QUR5dDZU')
 BOT_USERNAME = 'CashPoinntbot'
 
 # Group configuration
@@ -55,6 +59,33 @@ REFERRAL_REWARD = 2  # 2 Taka per successful referral
 # Initialize Firebase with better error handling
 db = None
 firebase_error_details = None
+
+# Global bot instance
+bot_instance = None
+
+# Flask routes for Railway health checks
+@app.route('/')
+def health_check():
+    """Health check endpoint for Railway"""
+    return jsonify({
+        'status': 'healthy',
+        'bot': 'Cash Points Bot',
+        'database': 'connected' if db else 'offline',
+        'timestamp': datetime.now().isoformat()
+    })
+
+@app.route('/webhook', methods=['POST'])
+def webhook():
+    """Webhook endpoint for Telegram bot"""
+    if request.method == 'POST':
+        if bot_instance:
+            # Forward the webhook to the bot
+            update = Update.de_json(request.get_json(), bot_instance.application.bot)
+            bot_instance.application.process_update(update)
+            return jsonify({'status': 'ok'})
+        else:
+            return jsonify({'status': 'error', 'message': 'Bot not initialized'}), 500
+    return jsonify({'status': 'error', 'message': 'Method not allowed'}), 405
 
 def check_system_time():
     """Check if system time is reasonable (not too far off)"""
@@ -222,11 +253,11 @@ class CashPoinntBot:
     def generate_referral_code(self, user_id: int) -> str:
         """Generate referral code for user"""
         try:
-            # Use CP + last 6 digits of user ID (matching frontend)
-            return f"CP{str(user_id)[-6:].upper()}"
+            # Use CP + full telegram ID (matching mini app and enhanced bot)
+            return f"CP{str(user_id)}"
         except Exception as e:
             logger.error(f"Error generating referral code: {e}")
-            return f"CP{str(user_id)[-6:]}"
+            return f"CP{str(user_id)}"
     
     async def get_user_from_db(self, telegram_id: str) -> Optional[Dict[str, Any]]:
         """Get user data from Firebase"""
@@ -382,6 +413,7 @@ class CashPoinntBot:
             referral_doc = docs[0]
             referral_data = referral_doc.to_dict()
             referrer_id = referral_data['referrer_id']
+            referral_code = referral_data['referral_code']
             
             # Update referral status
             referral_doc.reference.update({
@@ -411,6 +443,24 @@ class CashPoinntBot:
                     'total_referrals': new_total_referrals,
                     'updated_at': datetime.now()
                 })
+                
+                # Update referral_codes collection
+                try:
+                    referral_codes_ref = self.db.collection('referralCodes')
+                    referral_code_query = referral_codes_ref.where('referral_code', '==', referral_code).limit(1)
+                    referral_code_docs = list(referral_code_query.stream())
+                    
+                    if referral_code_docs:
+                        referral_code_doc = referral_code_docs[0]
+                        current_usage = referral_code_doc.to_dict().get('usage_count', 0)
+                        referral_code_doc.reference.update({
+                            'usage_count': current_usage + 1,
+                            'last_used': datetime.now(),
+                            'updated_at': datetime.now()
+                        })
+                        logger.info(f"✅ Updated referral code usage count: {referral_code}")
+                except Exception as e:
+                    logger.warning(f"Failed to update referral code usage: {e}")
                 
                 # Create earnings record
                 earnings_ref = self.db.collection('earnings')
@@ -484,7 +534,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         logger.info(f"✅ Found referrer {referrer_id} by referral code {referral_code}")
                     else:
                         # Fallback: try referral_codes collection
-                        referral_codes_ref = bot_instance.db.collection('referral_codes')
+                        referral_codes_ref = bot_instance.db.collection('referralCodes')
                         query = referral_codes_ref.where('referral_code', '==', referral_code).where('is_active', '==', True).limit(1)
                         docs = list(query.stream())
                         
@@ -493,6 +543,9 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                             logger.info(f"✅ Found referrer {referrer_id} in referral_codes collection")
                         else:
                             logger.warning(f"❌ No referrer found for code: {referral_code}")
+                            # Try to create missing referral codes
+                            await bot_instance.create_missing_referral_codes()
+                            referrer_id = None
                     
                     if referrer_id and referrer_id != user_id:
                         # Process referral
@@ -500,14 +553,15 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         logger.info(f"✅ Processed referral: {referrer_id} → {user_id}")
                     elif referrer_id == user_id:
                         logger.warning(f"⚠️ User {user_id} tried to use their own referral code")
-                    
-                    if referrer_id and referrer_id != user_id:
-                        # Process referral
-                        await bot_instance.process_referral(referrer_id, user_id, referral_code)
-                        logger.info(f"✅ Processed referral: {referrer_id} → {user_id}")
+                    else:
+                        logger.info(f"⚠️ No valid referrer found for code: {referral_code}")
                         
                 except Exception as e:
-                    logger.warning(f"Referral code processing failed (continuing): {e}")
+                    logger.error(f"Error processing referral code {referral_code}: {e}")
+            else:
+                logger.info("📝 Database not connected, skipping referral processing")
+        else:
+            logger.info(f"⚠️ Invalid referral code format: {referral_code}")
     
     # Check if user is already a group member
     is_member = await bot_instance.check_group_membership(user.id, context)
@@ -759,16 +813,22 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 def main():
     """Main function to run the bot"""
+    global bot_instance
+    
     # Create application
-    app = Application.builder().token(BOT_TOKEN).build()
+    application = Application.builder().token(BOT_TOKEN).build()
     
     # Add command handlers
-    app.add_handler(CommandHandler("start", start_command))
-    app.add_handler(CommandHandler("help", help_command))
-    app.add_handler(CommandHandler("status", status_command))
+    application.add_handler(CommandHandler("start", start_command))
+    application.add_handler(CommandHandler("help", help_command))
+    application.add_handler(CommandHandler("status", status_command))
     
     # Add callback query handler
-    app.add_handler(CallbackQueryHandler(handle_callback_query))
+    application.add_handler(CallbackQueryHandler(handle_callback_query))
+    
+    # Create bot instance
+    bot_instance = CashPoinntBot()
+    bot_instance.application = application
     
     # Start the bot
     print("🤖 Cash Points Bot Starting...")
@@ -784,8 +844,30 @@ def main():
     
     print("🚀 Bot is ready to receive commands!")
     
-    # Run the bot
-    app.run_polling()
+    # Check if running on Railway (production)
+    port = int(os.environ.get('PORT', 8080))
+    
+    if os.environ.get('RAILWAY_ENVIRONMENT'):
+        # Production mode - use webhook
+        print(f"🚂 Railway Environment Detected - Using Webhook on port {port}")
+        
+        # Set webhook URL
+        webhook_url = os.environ.get('WEBHOOK_URL')
+        if webhook_url:
+            application.bot.set_webhook(url=f"{webhook_url}/webhook")
+            print(f"🔗 Webhook set to: {webhook_url}/webhook")
+        
+        # Start webhook
+        application.run_webhook(
+            listen="0.0.0.0",
+            port=port,
+            webhook_url=f"/webhook",
+            secret_token=os.environ.get('WEBHOOK_SECRET', 'your-secret-token')
+        )
+    else:
+        # Development mode - use polling
+        print("🖥️  Development Environment - Using Polling")
+        application.run_polling()
 
 
 if __name__ == "__main__":
