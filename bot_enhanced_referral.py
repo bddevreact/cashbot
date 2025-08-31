@@ -13,7 +13,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # Bot token - moved to environment variable for security
-TOKEN = os.getenv('BOT_TOKEN', '8214925584:AAGzxmpSxFTGmvU-L778DNxUJ35QUR5dDZU')
+TOKEN = os.getenv('BOT_TOKEN', '')
 
 # Firebase configuration
 # Will be initialized after RateLimiter class
@@ -1176,3 +1176,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
