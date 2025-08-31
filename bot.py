@@ -118,16 +118,26 @@ def validate_firebase_connection():
         return True, None
     except Exception as e:
         error_str = str(e)
+        print(f"❌ Firebase connection test failed: {error_str}")
+        
         if "Invalid JWT Signature" in error_str or "invalid_grant" in error_str:
+            print("🔍 JWT signature error detected. This usually means:")
+            print("   - Service account key is corrupted")
+            print("   - System time is incorrect")
+            print("   - Private key format is wrong")
+            
             # Try to wait and retry once for JWT issues
-            print("⏳ JWT error detected, waiting 2 seconds and retrying...")
+            print("⏳ Waiting 2 seconds and retrying...")
             import time
             time.sleep(2)
             try:
                 list(test_ref.stream())
+                print("✅ Retry successful!")
                 return True, None
             except Exception as retry_e:
+                print(f"❌ Retry failed: {str(retry_e)}")
                 return False, f"Retry failed: {str(retry_e)}"
+        
         return False, error_str
 
 try:
@@ -141,8 +151,34 @@ try:
     else:
         print("✅ System time check passed")
     
-    # Try to load from serviceAccountKey.json first
-    if os.path.exists('serviceAccountKey.json'):
+    # Prioritize environment variables for Railway deployment
+    firebase_project_id = os.getenv('FIREBASE_PROJECT_ID')
+    firebase_private_key = os.getenv('FIREBASE_PRIVATE_KEY')
+    firebase_client_email = os.getenv('FIREBASE_CLIENT_EMAIL')
+    
+    if firebase_project_id and firebase_private_key and firebase_client_email:
+        print("🌍 Loading Firebase credentials from environment variables (Railway)")
+        firebase_config = {
+            "type": os.getenv('FIREBASE_TYPE', 'service_account'),
+            "project_id": firebase_project_id,
+            "private_key_id": os.getenv('FIREBASE_PRIVATE_KEY_ID'),
+            "private_key": firebase_private_key.replace('\\n', '\n'),
+            "client_email": firebase_client_email,
+            "client_id": os.getenv('FIREBASE_CLIENT_ID'),
+            "auth_uri": os.getenv('FIREBASE_AUTH_URI', 'https://accounts.google.com/o/oauth2/auth'),
+            "token_uri": os.getenv('FIREBASE_TOKEN_URI', 'https://oauth2.googleapis.com/token'),
+            "auth_provider_x509_cert_url": os.getenv('FIREBASE_AUTH_PROVIDER_X509_CERT_URL'),
+            "client_x509_cert_url": os.getenv('FIREBASE_CLIENT_X509_CERT_URL'),
+            "universe_domain": os.getenv('FIREBASE_UNIVERSE_DOMAIN', 'googleapis.com')
+        }
+        
+        print(f"🔑 Service Account: {firebase_client_email}")
+        print(f"🏗️ Project ID: {firebase_project_id}")
+        
+        cred = credentials.Certificate(firebase_config)
+        firebase_admin.initialize_app(cred)
+        
+    elif os.path.exists('serviceAccountKey.json'):
         print("📄 Loading Firebase credentials from serviceAccountKey.json")
         
         # Validate JSON file first
@@ -166,27 +202,7 @@ try:
         firebase_admin.initialize_app(cred)
         
     else:
-        # Load from environment variables
-        print("🌍 Loading Firebase credentials from environment variables")
-        firebase_config = {
-            "type": os.getenv('FIREBASE_TYPE', 'service_account'),
-            "project_id": os.getenv('FIREBASE_PROJECT_ID'),
-            "private_key_id": os.getenv('FIREBASE_PRIVATE_KEY_ID'),
-            "private_key": os.getenv('FIREBASE_PRIVATE_KEY', '').replace('\\n', '\n'),
-            "client_email": os.getenv('FIREBASE_CLIENT_EMAIL'),
-            "client_id": os.getenv('FIREBASE_CLIENT_ID'),
-            "auth_uri": os.getenv('FIREBASE_AUTH_URI', 'https://accounts.google.com/o/oauth2/auth'),
-            "token_uri": os.getenv('FIREBASE_TOKEN_URI', 'https://oauth2.googleapis.com/token'),
-            "auth_provider_x509_cert_url": os.getenv('FIREBASE_AUTH_PROVIDER_X509_CERT_URL'),
-            "client_x509_cert_url": os.getenv('FIREBASE_CLIENT_X509_CERT_URL'),
-            "universe_domain": os.getenv('FIREBASE_UNIVERSE_DOMAIN', 'googleapis.com')
-        }
-        
-        if not firebase_config['project_id']:
-            raise ValueError("Firebase project_id is required")
-            
-        cred = credentials.Certificate(firebase_config)
-        firebase_admin.initialize_app(cred)
+        raise ValueError("No Firebase credentials found. Please set environment variables or provide serviceAccountKey.json")
     
     # Initialize Firestore client
     db = firestore.client()
